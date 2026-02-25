@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { supercollider } from './sc-language.js';
 
 // ── SuperCollider example shown on first load ────────────────────────────────
 const INITIAL_CODE = `// SC Web — SuperCollider Browser IDE
@@ -52,7 +53,7 @@ const S = {
   editor: { flex: 1, overflow: 'auto', minWidth: 0 },
   // Right panel (Post / Help tabs)
   rightPanel: (helpActive) => ({
-    width: helpActive ? 520 : 340,
+    width: helpActive ? 1020 : 340,
     display: 'flex',
     flexDirection: 'column',
     borderLeft: '1px solid #2a2a4a',
@@ -276,6 +277,7 @@ export default function App() {
             theme={oneDark}
             height="100%"
             style={{ height: '100%' }}
+            extensions={supercollider}
             onChange={setCode}
           />
         </div>
