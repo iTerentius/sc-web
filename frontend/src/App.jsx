@@ -98,7 +98,8 @@ function useMobile() {
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
   root: {
-    display: 'flex', flexDirection: 'column', height: '100vh',
+    display: 'flex', flexDirection: 'column',
+    height: '100%', // inherits from #root which is sized via CSS (100dvh w/ 100vh fallback)
     background: '#0d0d1a',
   },
   toolbar: {
@@ -176,6 +177,7 @@ const S = {
     background: '#16213e',
     borderTop: '1px solid #2a2a4a',
     flexShrink: 0,
+    paddingBottom: 'env(safe-area-inset-bottom)', // clears iPhone home indicator
   },
   mobileNavBtn: (active) => ({
     flex: 1,

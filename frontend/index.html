@@ -2,11 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>SC Web</title>
     <style>
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      html, body, #root { height: 100%; overflow: hidden; }
+      html { height: 100vh; height: 100dvh; } /* dvh excludes mobile browser chrome */
+      body, #root { height: 100%; overflow: hidden; }
       body { background: #1a1a2e; color: #eee; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
     </style>
   </head>
