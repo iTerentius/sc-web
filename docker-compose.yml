@@ -1,0 +1,42 @@
+version: '3.9'
+
+services:
+  icecast:
+    build: ./icecast
+    container_name: icecast
+    restart: unless-stopped
+    ports:
+      - "8000:8000"   # exposed for direct debug; browser uses /stream via nginx
+    networks:
+      - sc-net
+
+  sc-backend:
+    build: ./sc-backend
+    container_name: sc-backend
+    restart: unless-stopped
+    shm_size: '256m'   # jackd needs ~107 MB of /dev/shm; Docker default (64M) is too small
+    depends_on:
+      - icecast
+    environment:
+      - ICECAST_HOST=icecast
+      - ICECAST_PORT=8000
+      - ICECAST_PASSWORD=hackme
+      - ICECAST_MOUNT=stream.mp3
+    networks:
+      - sc-net
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - sc-backend
+      - icecast
+    networks:
+      - sc-net
+
+networks:
+  sc-net:
+    driver: bridge
