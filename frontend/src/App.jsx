@@ -194,23 +194,6 @@ export default function App() {
     }
   }, [output]);
 
-  // ── Live-edge nudge ──────────────────────────────────────────────────────────
-  // The browser buffers live HTTP audio ahead by up to 30 seconds.
-  // Every second, if playback has drifted more than 2 s behind the latest
-  // buffered data, jump forward to within 0.5 s of the live edge.
-  // This keeps perceived latency at ~0.5–2 s without reloading the stream.
-  useEffect(() => {
-    const id = setInterval(() => {
-      const audio = audioRef.current;
-      if (!audio || audio.paused || !audio.buffered.length) return;
-      const buf      = audio.buffered;
-      const liveEdge = buf.end(buf.length - 1);
-      if (liveEdge - audio.currentTime > 2) {
-        audio.currentTime = liveEdge - 0.5;
-      }
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
 
   // WebSocket lifecycle
   useEffect(() => {
