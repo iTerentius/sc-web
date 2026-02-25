@@ -354,30 +354,58 @@ export default function App() {
     { key: 'Ctrl-.',     run: () => { handleStop(); return true; }, preventDefault: true },
   ]), [handleEval, handleStop]);
 
-  // Inject click-to-editor handlers into the help iframe
-  const handleHelpLoad = useCallback(() => {
+  // ── Help iframe injection ─────────────────────────────────────────────────────
+  // We need to inject click handlers whenever the iframe's document is accessible.
+  // On iOS, contentDocument is null while the iframe is hidden (display:none), so
+  // onLoad alone isn't enough — we also re-inject when the help panel becomes visible.
+  //
+  // A ref-based callback is used so click handlers always see the current `mobile`
+  // value without needing to be re-attached when it changes.
+  const onHelpCodeClick = useRef(null);
+  onHelpCodeClick.current = (code) => {
+    setCode(code);
+    if (mobile) setMobileTab('editor');
+  };
+
+  const injectHelpHandlers = useCallback(() => {
     try {
       const doc = iframeRef.current?.contentDocument;
-      if (!doc) return;
-      const style = doc.createElement('style');
-      style.textContent = HELP_INJECT_CSS;
-      doc.head?.appendChild(style);
-      doc.querySelectorAll('div.codeMirrorContainer').forEach((container) => {
-        container.addEventListener('click', () => {
+      if (!doc?.body) return;
+
+      // Inject highlight CSS (once per document)
+      if (!doc.getElementById('sc-web-help-css')) {
+        const style = doc.createElement('style');
+        style.id = 'sc-web-help-css';
+        style.textContent = HELP_INJECT_CSS;
+        doc.head?.appendChild(style);
+      }
+
+      // Attach one delegated listener per document (idempotent via flag)
+      if (!doc.body.dataset.scWired) {
+        doc.body.dataset.scWired = '1';
+        doc.addEventListener('click', (e) => {
+          const container = e.target.closest('div.codeMirrorContainer');
+          if (!container) return;
           const ta = container.querySelector('textarea.editor');
-          if (ta) {
-            setCode(ta.value.trim());
-            if (mobile) setMobileTab('editor');
-          }
+          if (ta) onHelpCodeClick.current(ta.value.trim());
         });
-      });
-    } catch (_) { /* cross-origin — ignore */ }
-  }, [mobile]);
+      }
+    } catch (_) { /* cross-origin navigation — ignore */ }
+  }, []);
+
+  // Fire on iframe page load and whenever the help panel becomes visible
+  const handleHelpLoad = useCallback(() => {
+    injectHelpHandlers();
+  }, [injectHelpHandlers]);
 
   // ── Derived visibility ────────────────────────────────────────────────────────
   const editorVisible = !mobile || mobileTab === 'editor';
   const postVisible   = mobile ? mobileTab === 'post' : showPost;
   const helpVisible   = mobile ? mobileTab === 'help' : showHelp;
+
+  useEffect(() => {
+    if (helpVisible) injectHelpHandlers();
+  }, [helpVisible, injectHelpHandlers]);
 
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
