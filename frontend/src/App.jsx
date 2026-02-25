@@ -5,22 +5,68 @@ import { supercollider } from './sc-language.js';
 
 // ── SuperCollider example shown on first load ────────────────────────────────
 const INITIAL_CODE = `// SC Web — SuperCollider Browser IDE
-// Ctrl+Enter  →  evaluate all code
-// Click "Stop" →  CmdPeriod (silence everything)
+// Ctrl+Enter  →  evaluate current ( ) block, or selection
+// Ctrl+/      →  toggle line comment(s)
+// Stop        →  CmdPeriod (silence everything)
 
-// Boot the server first (done automatically on startup — watch the post window)
+// Place the cursor inside any ( ) block and press Ctrl+Enter.
 
-// ── Examples ──────────────────────────────────────────────────────────────────
-
-// Sine wave at 440 Hz
+// ── Sine wave ──────────────────────────────────────────────────────────────────
+(
 { SinOsc.ar(440, 0, 0.2) ! 2 }.play;
+)
 
-// // Filtered noise
+// ── Filtered noise ─────────────────────────────────────────────────────────────
+// (
 // { RLPF.ar(WhiteNoise.ar(0.3), LFNoise1.kr(1).exprange(200, 4000), 0.1) ! 2 }.play;
+// )
 
-// // Simple pattern
+// ── Simple pattern ─────────────────────────────────────────────────────────────
+// (
 // Pbind(\\instrument, \\default, \\degree, Pseq([0, 2, 4, 7], inf), \\dur, 0.25).play;
+// )
 `;
+
+// ── Block finder ──────────────────────────────────────────────────────────────
+// Given the full document text and the cursor position, returns the content of
+// the innermost (...) block enclosing the cursor.  Falls back to the current
+// line if the cursor is not inside a block.
+// Note: does not skip parens inside strings/comments — good enough for normal SC.
+function findCurrentBlock(text, pos) {
+  // Walk backward to find the nearest unmatched (
+  let depth = 0;
+  let start = -1;
+  for (let i = pos - 1; i >= 0; i--) {
+    const ch = text[i];
+    if      (ch === ')') depth++;
+    else if (ch === '(') {
+      if (depth === 0) { start = i; break; }
+      depth--;
+    }
+  }
+
+  if (start === -1) {
+    // No enclosing ( — fall back to the current line
+    const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
+    const lineEnd   = text.indexOf('\n', pos);
+    return text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd).trim();
+  }
+
+  // Walk forward from ( to find the matching )
+  depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if      (text[i] === '(') depth++;
+    else if (text[i] === ')') {
+      if (--depth === 0) {
+        // Return inner content; the bridge wraps it in ( ) on the server side
+        return text.slice(start + 1, i).trim();
+      }
+    }
+  }
+
+  // Unmatched ( — return everything after it
+  return text.slice(start + 1).trim();
+}
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
@@ -133,10 +179,12 @@ export default function App() {
   const [output, setOutput]       = useState('Connecting to bridge…\n');
   const [connected, setConnected] = useState(false);
   const [rightTab, setRightTab]   = useState('post');
-  const wsRef     = useRef(null);
-  const postRef   = useRef(null);
-  const iframeRef = useRef(null);
-  const reconnect = useRef(true);
+  const wsRef      = useRef(null);
+  const postRef    = useRef(null);
+  const iframeRef  = useRef(null);
+  const editorRef  = useRef(null);   // EditorView — for reading selection / cursor
+  const audioRef   = useRef(null);   // <audio> element — for live-edge nudging
+  const reconnect  = useRef(true);
 
   // Auto-scroll post window
   useEffect(() => {
@@ -144,6 +192,24 @@ export default function App() {
       postRef.current.scrollTop = postRef.current.scrollHeight;
     }
   }, [output]);
+
+  // ── Live-edge nudge ──────────────────────────────────────────────────────────
+  // The browser buffers live HTTP audio ahead by up to 30 seconds.
+  // Every second, if playback has drifted more than 2 s behind the latest
+  // buffered data, jump forward to within 0.5 s of the live edge.
+  // This keeps perceived latency at ~0.5–2 s without reloading the stream.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const audio = audioRef.current;
+      if (!audio || audio.paused || !audio.buffered.length) return;
+      const buf      = audio.buffered;
+      const liveEdge = buf.end(buf.length - 1);
+      if (liveEdge - audio.currentTime > 2) {
+        audio.currentTime = liveEdge - 0.5;
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // WebSocket lifecycle
   useEffect(() => {
@@ -189,7 +255,20 @@ export default function App() {
     }
   }, []);
 
-  const handleEval = useCallback(() => send('eval', { code }), [code, send]);
+  // ── Eval ──────────────────────────────────────────────────────────────────────
+  // Priority: text selection → current ( ) block → current line
+  const handleEval = useCallback(() => {
+    const view = editorRef.current;
+    let codeToEval = code; // fallback if view not ready
+    if (view) {
+      const sel = view.state.selection.main;
+      codeToEval = sel.empty
+        ? findCurrentBlock(view.state.doc.toString(), sel.head)
+        : view.state.doc.sliceString(sel.from, sel.to);
+    }
+    if (codeToEval.trim()) send('eval', { code: codeToEval });
+  }, [code, send]);
+
   const handleStop = useCallback(() => send('stop'), [send]);
   const handleClear = () => setOutput('');
 
@@ -240,7 +319,7 @@ export default function App() {
           style={S.btn('#4ecca3', !connected)}
           disabled={!connected}
           onClick={handleEval}
-          title="Ctrl+Enter"
+          title="Ctrl+Enter — eval current block or selection"
         >
           Eval
         </button>
@@ -262,6 +341,7 @@ export default function App() {
 
         {/* Live stream player */}
         <audio
+          ref={audioRef}
           controls
           src="/stream"
           style={S.audio}
@@ -278,6 +358,7 @@ export default function App() {
             height="100%"
             style={{ height: '100%' }}
             extensions={supercollider}
+            onCreateEditor={(view) => { editorRef.current = view; }}
             onChange={setCode}
           />
         </div>
