@@ -2,15 +2,16 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { supercollider } from './sc-language.js';
-import { keymap } from '@codemirror/view';
+import { Decoration, EditorView, keymap } from '@codemirror/view';
+import { StateEffect, StateField } from '@codemirror/state';
 
 // ── SuperCollider example shown on first load ────────────────────────────────
 const INITIAL_CODE = `// SC Web — SuperCollider Browser IDE
 // Ctrl+Enter / Ctrl+e  →  evaluate current ( ) block, or selection
 // Ctrl+/               →  toggle line comment(s)
-// Stop                 →  CmdPeriod (silence everything)
+// Ctrl+.               →  CmdPeriod (silence everything)
 
-// Place the cursor inside any ( ) block and press Ctrl+Enter.
+// Place the cursor anywhere inside a ( ) block and press Ctrl+Enter.
 
 // ── Sine wave ──────────────────────────────────────────────────────────────────
 (
@@ -29,45 +30,62 @@ const INITIAL_CODE = `// SC Web — SuperCollider Browser IDE
 `;
 
 // ── Block finder ──────────────────────────────────────────────────────────────
-// Given the full document text and the cursor position, returns the content of
-// the innermost (...) block enclosing the cursor.  Falls back to the current
-// line if the cursor is not inside a block.
+// Scans forward from the document start to build a stack of open ( positions.
+// The outermost enclosing ( at `pos` is stack[0]; we walk forward from there
+// to find the matching ) and return { code, from, to }.
+// Falls back to the current line when the cursor is outside any ( ) block.
 // Note: does not skip parens inside strings/comments — good enough for normal SC.
-function findCurrentBlock(text, pos) {
-  // Walk backward to find the nearest unmatched (
-  let depth = 0;
-  let start = -1;
-  for (let i = pos - 1; i >= 0; i--) {
-    const ch = text[i];
-    if      (ch === ')') depth++;
-    else if (ch === '(') {
-      if (depth === 0) { start = i; break; }
-      depth--;
-    }
+function findBlockToEval(text, pos) {
+  const stack = [];
+  for (let i = 0; i < pos; i++) {
+    if      (text[i] === '(') stack.push(i);
+    else if (text[i] === ')') stack.pop();
   }
 
-  if (start === -1) {
-    // No enclosing ( — fall back to the current line
-    const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
-    const lineEnd   = text.indexOf('\n', pos);
-    return text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd).trim();
-  }
-
-  // Walk forward from ( to find the matching )
-  depth = 0;
-  for (let i = start; i < text.length; i++) {
-    if      (text[i] === '(') depth++;
-    else if (text[i] === ')') {
-      if (--depth === 0) {
-        // Return inner content; the bridge wraps it in ( ) on the server side
-        return text.slice(start + 1, i).trim();
+  if (stack.length > 0) {
+    const start = stack[0]; // outermost unmatched (
+    let depth = 0;
+    for (let i = start; i < text.length; i++) {
+      if      (text[i] === '(') depth++;
+      else if (text[i] === ')') {
+        if (--depth === 0) {
+          // Return inner content; the bridge wraps it in ( ) server-side
+          return { code: text.slice(start + 1, i).trim(), from: start, to: i + 1 };
+        }
       }
     }
+    // Unmatched ( — return everything after it
+    return { code: text.slice(start + 1).trim(), from: start, to: text.length };
   }
 
-  // Unmatched ( — return everything after it
-  return text.slice(start + 1).trim();
+  // Fallback: current line
+  const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
+  const lineEnd   = text.indexOf('\n', pos);
+  const to        = lineEnd === -1 ? text.length : lineEnd;
+  return { code: text.slice(lineStart, to).trim(), from: lineStart, to };
 }
+
+// ── Eval flash ────────────────────────────────────────────────────────────────
+// Briefly highlights the evaluated region with a green tint.
+const flashEffect = StateEffect.define();
+const flashField  = StateField.define({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    deco = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(flashEffect)) {
+        deco = e.value != null
+          ? Decoration.set([Decoration.mark({ class: 'cm-eval-flash' }).range(e.value.from, e.value.to)])
+          : Decoration.none;
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+const flashTheme = EditorView.baseTheme({
+  '.cm-eval-flash': { backgroundColor: 'rgba(78, 204, 163, 0.2)' },
+});
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
@@ -194,6 +212,28 @@ export default function App() {
     }
   }, [output]);
 
+  // ── Live-edge nudge ──────────────────────────────────────────────────────────
+  // The browser buffers ~11 s ahead of the live edge before playing.
+  // When lag > 6 s, mute briefly and jump to 2 s behind the live edge.
+  // Muting hides the seek discontinuity so there's no audible click.
+  // Rate-limited to once per 8 s so rapid re-seeks can't stack up.
+  useEffect(() => {
+    let lastSeek = 0;
+    const id = setInterval(() => {
+      const audio = audioRef.current;
+      if (!audio || audio.paused || !audio.buffered.length) return;
+      const buf      = audio.buffered;
+      const liveEdge = buf.end(buf.length - 1);
+      const now      = Date.now();
+      if (liveEdge - audio.currentTime > 6 && now - lastSeek > 8000) {
+        lastSeek = now;
+        audio.muted = true;
+        audio.currentTime = liveEdge - 2;
+        setTimeout(() => { audio.muted = false; }, 500);
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // WebSocket lifecycle
   useEffect(() => {
@@ -240,27 +280,35 @@ export default function App() {
   }, []);
 
   // ── Eval ──────────────────────────────────────────────────────────────────────
-  // Priority: text selection → current ( ) block → current line
+  // Priority: text selection → outermost ( ) block → current line
   const handleEval = useCallback(() => {
     const view = editorRef.current;
     if (!view) return;
     const sel = view.state.selection.main;
-    const codeToEval = sel.empty
-      ? findCurrentBlock(view.state.doc.toString(), sel.head)
-      : view.state.doc.sliceString(sel.from, sel.to);
-    if (codeToEval.trim()) send('eval', { code: codeToEval });
+    let from, to, code;
+    if (sel.empty) {
+      ({ from, to, code } = findBlockToEval(view.state.doc.toString(), sel.head));
+    } else {
+      from = sel.from; to = sel.to;
+      code = view.state.doc.sliceString(from, to);
+    }
+    if (!code.trim()) return;
+    send('eval', { code });
+    // Flash the evaluated region
+    view.dispatch({ effects: flashEffect.of({ from, to }) });
+    setTimeout(() => view.dispatch({ effects: flashEffect.of(null) }), 300);
   }, [send]);
 
   const handleStop = useCallback(() => send('stop'), [send]);
   const handleClear = () => setOutput('');
 
-  // Keyboard shortcuts: Ctrl+Enter / Ctrl+e to eval
-  // Placed inside CM6's keymap so `run` returning true prevents any further
-  // processing (newline insertion) — window-level listeners fire too late.
-  const evalKeymap = useMemo(() => keymap.of([
+  // Keyboard shortcuts inside CM6's keymap so `run` returning true prevents
+  // default behaviour (newline insertion for Enter, etc.).
+  const scExecKeymap = useMemo(() => keymap.of([
     { key: 'Ctrl-Enter', run: () => { handleEval(); return true; }, preventDefault: true },
     { key: 'Ctrl-e',     run: () => { handleEval(); return true; }, preventDefault: true },
-  ]), [handleEval]);
+    { key: 'Ctrl-.',     run: () => { handleStop(); return true; }, preventDefault: true },
+  ]), [handleEval, handleStop]);
 
   // Inject click-to-editor handlers into the help iframe after each navigation.
   // Same-origin iframe: we can access contentDocument directly and close over setCode.
@@ -309,6 +357,7 @@ export default function App() {
           style={S.btn('#e94560', !connected)}
           disabled={!connected}
           onClick={handleStop}
+          title="Ctrl+. — CmdPeriod (silence all)"
         >
           Stop
         </button>
@@ -338,7 +387,7 @@ export default function App() {
             theme={oneDark}
             height="100%"
             style={{ height: '100%' }}
-            extensions={[supercollider, evalKeymap]}
+            extensions={[supercollider, scExecKeymap, flashField, flashTheme]}
             onCreateEditor={(view) => { editorRef.current = view; }}
             onChange={setCode}
           />
