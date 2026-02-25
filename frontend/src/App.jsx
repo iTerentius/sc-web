@@ -31,10 +31,9 @@ const INITIAL_CODE = `// SC Web — SuperCollider Browser IDE
 
 // ── Block finder ──────────────────────────────────────────────────────────────
 // Scans forward from the document start to build a stack of open ( positions.
-// The outermost enclosing ( at `pos` is stack[0]; we walk forward from there
-// to find the matching ) and return { code, from, to }.
-// Falls back to the current line when the cursor is outside any ( ) block.
-// Note: does not skip parens inside strings/comments — good enough for normal SC.
+// If cursor is inside a block: stack[0] is the outermost enclosing (.
+// If cursor is between blocks: scan forward from cursor for the next (.
+// Falls back to the current line only when there is no ( anywhere near.
 function findBlockToEval(text, pos) {
   const stack = [];
   for (let i = 0; i < pos; i++) {
@@ -42,31 +41,29 @@ function findBlockToEval(text, pos) {
     else if (text[i] === ')') stack.pop();
   }
 
-  if (stack.length > 0) {
-    const start = stack[0]; // outermost unmatched (
-    let depth = 0;
-    for (let i = start; i < text.length; i++) {
-      if      (text[i] === '(') depth++;
-      else if (text[i] === ')') {
-        if (--depth === 0) {
-          // Return inner content; the bridge wraps it in ( ) server-side
-          return { code: text.slice(start + 1, i).trim(), from: start, to: i + 1 };
-        }
-      }
-    }
-    // Unmatched ( — return everything after it
-    return { code: text.slice(start + 1).trim(), from: start, to: text.length };
+  const start = stack.length > 0 ? stack[0] : text.indexOf('(', pos);
+
+  if (start === -1) {
+    // No ( anywhere — fall back to the current line
+    const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
+    const lineEnd   = text.indexOf('\n', pos);
+    const to        = lineEnd === -1 ? text.length : lineEnd;
+    return { code: text.slice(lineStart, to).trim(), from: lineStart, to };
   }
 
-  // Fallback: current line
-  const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
-  const lineEnd   = text.indexOf('\n', pos);
-  const to        = lineEnd === -1 ? text.length : lineEnd;
-  return { code: text.slice(lineStart, to).trim(), from: lineStart, to };
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if      (text[i] === '(') depth++;
+    else if (text[i] === ')') {
+      if (--depth === 0) {
+        return { code: text.slice(start + 1, i).trim(), from: start, to: i + 1 };
+      }
+    }
+  }
+  return { code: text.slice(start + 1).trim(), from: start, to: text.length };
 }
 
 // ── Eval flash ────────────────────────────────────────────────────────────────
-// Briefly highlights the evaluated region with a green tint.
 const flashEffect = StateEffect.define();
 const flashField  = StateField.define({
   create: () => Decoration.none,
@@ -87,6 +84,17 @@ const flashTheme = EditorView.baseTheme({
   '.cm-eval-flash': { backgroundColor: 'rgba(78, 204, 163, 0.2)' },
 });
 
+// ── Mobile detection ──────────────────────────────────────────────────────────
+function useMobile() {
+  const [mobile, setMobile] = useState(() => window.innerWidth <= 768);
+  useEffect(() => {
+    const handler = () => setMobile(window.innerWidth <= 768);
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, []);
+  return mobile;
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
   root: {
@@ -94,11 +102,12 @@ const S = {
     background: '#0d0d1a',
   },
   toolbar: {
-    display: 'flex', alignItems: 'center', gap: 10,
+    display: 'flex', alignItems: 'center', gap: 8,
     padding: '6px 14px',
     background: '#16213e',
     borderBottom: '1px solid #2a2a4a',
     flexShrink: 0,
+    flexWrap: 'wrap',
   },
   title: { fontWeight: 700, color: '#4ecca3', letterSpacing: '0.05em' },
   dot: (ok) => ({ color: ok ? '#4ecca3' : '#e94560', fontSize: 12 }),
@@ -113,34 +122,33 @@ const S = {
     fontFamily: 'inherit',
     transition: 'opacity .15s',
   }),
+  btnToggle: (active) => ({
+    background: active ? 'rgba(78,204,163,0.15)' : 'transparent',
+    border: `1px solid ${active ? '#4ecca3' : '#444'}`,
+    color: active ? '#4ecca3' : '#666',
+    padding: '3px 10px',
+    borderRadius: 3,
+    cursor: 'pointer',
+    fontSize: 12,
+    fontFamily: 'inherit',
+  }),
   audio: { marginLeft: 'auto', height: 28 },
   body: { display: 'flex', flex: 1, overflow: 'hidden' },
   editor: { flex: 1, overflow: 'auto', minWidth: 0 },
-  // Right panel (Post / Help tabs)
-  rightPanel: (helpActive) => ({
-    width: helpActive ? 1020 : 340,
+  postPanel: {
+    width: 340,
     display: 'flex',
     flexDirection: 'column',
     borderLeft: '1px solid #2a2a4a',
     flexShrink: 0,
-    transition: 'width .15s',
-  }),
-  tabBar: {
+  },
+  helpPanel: {
+    width: 680,
     display: 'flex',
-    background: '#16213e',
-    borderBottom: '1px solid #2a2a4a',
+    flexDirection: 'column',
+    borderLeft: '1px solid #2a2a4a',
     flexShrink: 0,
   },
-  tab: (active) => ({
-    flex: 1,
-    padding: '4px 0',
-    background: active ? '#090914' : 'transparent',
-    border: 'none',
-    color: active ? '#4ecca3' : '#666',
-    cursor: 'pointer',
-    fontSize: 11,
-    fontFamily: 'inherit',
-  }),
   post: {
     flex: 1, padding: '6px 8px',
     overflowY: 'auto',
@@ -159,11 +167,54 @@ const S = {
     display: 'block',
     width: '100%',
   },
+  // ── Mobile-only ─────────────────────────────────────────────────────────────
+  mobilePanel: {
+    flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+  },
+  mobileBar: {
+    display: 'flex',
+    background: '#16213e',
+    borderTop: '1px solid #2a2a4a',
+    flexShrink: 0,
+  },
+  mobileNavBtn: (active) => ({
+    flex: 1,
+    padding: '12px 0 10px',
+    background: 'transparent',
+    border: 'none',
+    borderTop: `2px solid ${active ? '#4ecca3' : 'transparent'}`,
+    color: active ? '#4ecca3' : '#555',
+    cursor: 'pointer',
+    fontSize: 11,
+    fontFamily: 'inherit',
+  }),
+  mobileEval: {
+    flex: 1.4,
+    padding: '12px 0 10px',
+    background: 'rgba(78,204,163,0.12)',
+    border: 'none',
+    borderTop: '2px solid #4ecca3',
+    color: '#4ecca3',
+    cursor: 'pointer',
+    fontSize: 12,
+    fontFamily: 'inherit',
+    fontWeight: 700,
+  },
+  mobileStop: (disabled) => ({
+    flex: 1.4,
+    padding: '12px 0 10px',
+    background: disabled ? 'transparent' : 'rgba(233,69,96,0.12)',
+    border: 'none',
+    borderTop: `2px solid ${disabled ? '#333' : '#e94560'}`,
+    color: disabled ? '#444' : '#e94560',
+    cursor: disabled ? 'default' : 'pointer',
+    fontSize: 12,
+    fontFamily: 'inherit',
+    fontWeight: 700,
+  }),
 };
 
 // CSS injected into the help iframe to highlight clickable code blocks.
-// SC 3.14.1 SCDoc renders code examples as:
-//   <div class='codeMirrorContainer'><textarea class='editor'>…</textarea></div>
 const HELP_INJECT_CSS = `
   div.codeMirrorContainer {
     position: relative;
@@ -197,12 +248,15 @@ export default function App() {
   const [code, setCode]           = useState(INITIAL_CODE);
   const [output, setOutput]       = useState('Connecting to bridge…\n');
   const [connected, setConnected] = useState(false);
-  const [rightTab, setRightTab]   = useState('post');
+  const [showPost, setShowPost]   = useState(true);
+  const [showHelp, setShowHelp]   = useState(false);
+  const [mobileTab, setMobileTab] = useState('editor');
+  const mobile     = useMobile();
   const wsRef      = useRef(null);
   const postRef    = useRef(null);
   const iframeRef  = useRef(null);
-  const editorRef  = useRef(null);   // EditorView — for reading selection / cursor
-  const audioRef   = useRef(null);   // <audio> element — for live-edge nudging
+  const editorRef  = useRef(null);
+  const audioRef   = useRef(null);
   const reconnect  = useRef(true);
 
   // Auto-scroll post window
@@ -213,10 +267,6 @@ export default function App() {
   }, [output]);
 
   // ── Live-edge nudge ──────────────────────────────────────────────────────────
-  // The browser buffers ~11 s ahead of the live edge before playing.
-  // When lag > 6 s, mute briefly and jump to 2 s behind the live edge.
-  // Muting hides the seek discontinuity so there's no audible click.
-  // Rate-limited to once per 8 s so rapid re-seeks can't stack up.
   useEffect(() => {
     let lastSeek = 0;
     const id = setInterval(() => {
@@ -242,19 +292,13 @@ export default function App() {
       const url = `ws://${window.location.host}/ws`;
       const ws  = new WebSocket(url);
       wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnected(true);
-        append('Bridge connected.\n');
-      };
+      ws.onopen  = () => { setConnected(true);  append('Bridge connected.\n'); };
       ws.onclose = () => {
         setConnected(false);
         append('\n[disconnected — retrying in 3 s…]\n');
         setTimeout(connect, 3000);
       };
-      ws.onerror = () => {
-        append('[ws error]\n');
-      };
+      ws.onerror   = () => { append('[ws error]\n'); };
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
@@ -263,12 +307,8 @@ export default function App() {
         } catch { /* ignore */ }
       };
     }
-
     connect();
-    return () => {
-      reconnect.current = false;
-      wsRef.current?.close();
-    };
+    return () => { reconnect.current = false; wsRef.current?.close(); };
   }, []);
 
   const append = (text) => setOutput((prev) => prev + text);
@@ -280,7 +320,6 @@ export default function App() {
   }, []);
 
   // ── Eval ──────────────────────────────────────────────────────────────────────
-  // Priority: text selection → outermost ( ) block → current line
   const handleEval = useCallback(() => {
     const view = editorRef.current;
     if (!view) return;
@@ -294,47 +333,51 @@ export default function App() {
     }
     if (!code.trim()) return;
     send('eval', { code });
-    // Flash the evaluated region
     view.dispatch({ effects: flashEffect.of({ from, to }) });
     setTimeout(() => view.dispatch({ effects: flashEffect.of(null) }), 300);
   }, [send]);
 
-  const handleStop = useCallback(() => send('stop'), [send]);
+  const handleStop  = useCallback(() => send('stop'), [send]);
   const handleClear = () => setOutput('');
 
-  // Keyboard shortcuts inside CM6's keymap so `run` returning true prevents
-  // default behaviour (newline insertion for Enter, etc.).
+  // On mobile, tapping Eval switches to the Post tab so output is visible
+  const handleMobileEval = useCallback(() => {
+    handleEval();
+    setMobileTab('post');
+  }, [handleEval]);
+
   const scExecKeymap = useMemo(() => keymap.of([
     { key: 'Ctrl-Enter', run: () => { handleEval(); return true; }, preventDefault: true },
     { key: 'Ctrl-e',     run: () => { handleEval(); return true; }, preventDefault: true },
     { key: 'Ctrl-.',     run: () => { handleStop(); return true; }, preventDefault: true },
   ]), [handleEval, handleStop]);
 
-  // Inject click-to-editor handlers into the help iframe after each navigation.
-  // Same-origin iframe: we can access contentDocument directly and close over setCode.
+  // Inject click-to-editor handlers into the help iframe
   const handleHelpLoad = useCallback(() => {
     try {
       const doc = iframeRef.current?.contentDocument;
       if (!doc) return;
-
-      // Inject highlight CSS
       const style = doc.createElement('style');
       style.textContent = HELP_INJECT_CSS;
       doc.head?.appendChild(style);
-
-      // Wire every code block: click → send its text to the editor.
-      // SC 3.14.1 SCDoc uses div.codeMirrorContainer > textarea.editor
       doc.querySelectorAll('div.codeMirrorContainer').forEach((container) => {
         container.addEventListener('click', () => {
           const ta = container.querySelector('textarea.editor');
-          if (ta) setCode(ta.value.trim());
+          if (ta) {
+            setCode(ta.value.trim());
+            if (mobile) setMobileTab('editor');
+          }
         });
       });
-    } catch (_) {
-      // Cross-origin navigation (e.g. external link opened in iframe) — ignore
-    }
-  }, []);
+    } catch (_) { /* cross-origin — ignore */ }
+  }, [mobile]);
 
+  // ── Derived visibility ────────────────────────────────────────────────────────
+  const editorVisible = !mobile || mobileTab === 'editor';
+  const postVisible   = mobile ? mobileTab === 'post' : showPost;
+  const helpVisible   = mobile ? mobileTab === 'help' : showHelp;
+
+  // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <div style={S.root}>
       {/* ── Toolbar ── */}
@@ -344,32 +387,30 @@ export default function App() {
           {connected ? '● connected' : '○ disconnected'}
         </span>
 
-        <button
-          style={S.btn('#4ecca3', !connected)}
-          disabled={!connected}
-          onClick={handleEval}
-          title="Ctrl+Enter — eval current block or selection"
-        >
-          Eval
-        </button>
+        {/* Eval / Stop — desktop only; mobile uses the bottom bar */}
+        {!mobile && <>
+          <button
+            style={S.btn('#4ecca3', !connected)}
+            disabled={!connected}
+            onClick={handleEval}
+            title="Ctrl+Enter — eval current block or selection"
+          >Eval</button>
+          <button
+            style={S.btn('#e94560', !connected)}
+            disabled={!connected}
+            onClick={handleStop}
+            title="Ctrl+. — CmdPeriod (silence all)"
+          >Stop</button>
+        </>}
 
-        <button
-          style={S.btn('#e94560', !connected)}
-          disabled={!connected}
-          onClick={handleStop}
-          title="Ctrl+. — CmdPeriod (silence all)"
-        >
-          Stop
-        </button>
+        <button style={S.btn('#888', false)} onClick={handleClear}>Clear post</button>
 
-        <button
-          style={S.btn('#888', false)}
-          onClick={handleClear}
-        >
-          Clear post
-        </button>
+        {/* Post / Help toggles — desktop only */}
+        {!mobile && <>
+          <button style={S.btnToggle(showPost)} onClick={() => setShowPost(v => !v)}>Post</button>
+          <button style={S.btnToggle(showHelp)} onClick={() => setShowHelp(v => !v)}>Help</button>
+        </>}
 
-        {/* Live stream player */}
         <audio
           ref={audioRef}
           controls
@@ -379,9 +420,11 @@ export default function App() {
         />
       </div>
 
-      {/* ── Editor + Right panel ── */}
+      {/* ── Body ── */}
       <div style={S.body}>
-        <div style={S.editor}>
+
+        {/* Editor */}
+        <div style={{ ...S.editor, display: editorVisible ? 'flex' : 'none', flexDirection: 'column' }}>
           <CodeMirror
             value={code}
             theme={oneDark}
@@ -393,35 +436,58 @@ export default function App() {
           />
         </div>
 
-        {/* Right panel: Post / Help tabs */}
-        <div style={S.rightPanel(rightTab === 'help')}>
-          <div style={S.tabBar}>
-            <button style={S.tab(rightTab === 'post')} onClick={() => setRightTab('post')}>
-              Post
-            </button>
-            <button style={S.tab(rightTab === 'help')} onClick={() => setRightTab('help')}>
-              Help
-            </button>
-          </div>
+        {/* Post panel */}
+        <div style={{
+          ...(mobile ? S.mobilePanel : S.postPanel),
+          display: postVisible ? 'flex' : 'none',
+        }}>
+          <div ref={postRef} style={S.post}>{output}</div>
+        </div>
 
-          {/* Post window — always mounted, hidden when Help tab active */}
-          <div
-            ref={postRef}
-            style={{ ...S.post, display: rightTab === 'post' ? 'block' : 'none' }}
-          >
-            {output}
-          </div>
-
-          {/* Help iframe — always mounted so navigation is preserved across tab switches */}
+        {/* Help panel */}
+        <div style={{
+          ...(mobile ? S.mobilePanel : S.helpPanel),
+          display: helpVisible ? 'flex' : 'none',
+        }}>
           <iframe
             ref={iframeRef}
             src="/help/"
-            style={{ ...S.helpFrame, display: rightTab === 'help' ? 'block' : 'none' }}
+            style={S.helpFrame}
             onLoad={handleHelpLoad}
             title="SuperCollider Help"
           />
         </div>
+
       </div>
+
+      {/* ── Mobile bottom bar ── */}
+      {mobile && (
+        <div style={S.mobileBar}>
+          <button style={S.mobileNavBtn(mobileTab === 'editor')} onClick={() => setMobileTab('editor')}>
+            Editor
+          </button>
+          <button style={S.mobileNavBtn(mobileTab === 'post')} onClick={() => setMobileTab('post')}>
+            Post
+          </button>
+          <button style={S.mobileNavBtn(mobileTab === 'help')} onClick={() => setMobileTab('help')}>
+            Help
+          </button>
+          <button
+            style={S.mobileEval}
+            disabled={!connected}
+            onClick={handleMobileEval}
+          >
+            Eval ▶
+          </button>
+          <button
+            style={S.mobileStop(!connected)}
+            disabled={!connected}
+            onClick={handleStop}
+          >
+            ■ Stop
+          </button>
+        </div>
+      )}
     </div>
   );
 }
