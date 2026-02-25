@@ -50,27 +50,91 @@ const S = {
   audio: { marginLeft: 'auto', height: 28 },
   body: { display: 'flex', flex: 1, overflow: 'hidden' },
   editor: { flex: 1, overflow: 'auto', minWidth: 0 },
+  // Right panel (Post / Help tabs)
+  rightPanel: (helpActive) => ({
+    width: helpActive ? 520 : 340,
+    display: 'flex',
+    flexDirection: 'column',
+    borderLeft: '1px solid #2a2a4a',
+    flexShrink: 0,
+    transition: 'width .15s',
+  }),
+  tabBar: {
+    display: 'flex',
+    background: '#16213e',
+    borderBottom: '1px solid #2a2a4a',
+    flexShrink: 0,
+  },
+  tab: (active) => ({
+    flex: 1,
+    padding: '4px 0',
+    background: active ? '#090914' : 'transparent',
+    border: 'none',
+    color: active ? '#4ecca3' : '#666',
+    cursor: 'pointer',
+    fontSize: 11,
+    fontFamily: 'inherit',
+  }),
   post: {
-    width: 340, padding: '6px 8px',
+    flex: 1, padding: '6px 8px',
     overflowY: 'auto',
     background: '#090914',
-    borderLeft: '1px solid #2a2a4a',
     fontSize: 11.5,
     lineHeight: 1.55,
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
     color: '#b0b8d0',
-    flexShrink: 0,
+    minHeight: 0,
+  },
+  helpFrame: {
+    flex: 1,
+    border: 'none',
+    minHeight: 0,
+    display: 'block',
+    width: '100%',
   },
 };
+
+// CSS injected into the help iframe to highlight clickable code blocks.
+// SC 3.14.1 SCDoc renders code examples as:
+//   <div class='codeMirrorContainer'><textarea class='editor'>…</textarea></div>
+const HELP_INJECT_CSS = `
+  div.codeMirrorContainer {
+    position: relative;
+    cursor: pointer;
+  }
+  div.codeMirrorContainer::after {
+    content: '↗ send to editor';
+    position: absolute;
+    top: 4px; right: 6px;
+    font-size: 10px;
+    color: #4ecca3;
+    background: rgba(0,0,0,.6);
+    padding: 1px 5px;
+    border-radius: 3px;
+    opacity: 0;
+    transition: opacity .15s;
+    pointer-events: none;
+    font-family: sans-serif;
+  }
+  div.codeMirrorContainer:hover::after {
+    opacity: 1;
+  }
+  div.codeMirrorContainer:hover {
+    outline: 2px solid #4ecca3;
+    outline-offset: 2px;
+  }
+`;
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [code, setCode]           = useState(INITIAL_CODE);
   const [output, setOutput]       = useState('Connecting to bridge…\n');
   const [connected, setConnected] = useState(false);
+  const [rightTab, setRightTab]   = useState('post');
   const wsRef     = useRef(null);
   const postRef   = useRef(null);
+  const iframeRef = useRef(null);
   const reconnect = useRef(true);
 
   // Auto-scroll post window
@@ -137,6 +201,31 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [handleEval]);
 
+  // Inject click-to-editor handlers into the help iframe after each navigation.
+  // Same-origin iframe: we can access contentDocument directly and close over setCode.
+  const handleHelpLoad = useCallback(() => {
+    try {
+      const doc = iframeRef.current?.contentDocument;
+      if (!doc) return;
+
+      // Inject highlight CSS
+      const style = doc.createElement('style');
+      style.textContent = HELP_INJECT_CSS;
+      doc.head?.appendChild(style);
+
+      // Wire every code block: click → send its text to the editor.
+      // SC 3.14.1 SCDoc uses div.codeMirrorContainer > textarea.editor
+      doc.querySelectorAll('div.codeMirrorContainer').forEach((container) => {
+        container.addEventListener('click', () => {
+          const ta = container.querySelector('textarea.editor');
+          if (ta) setCode(ta.value.trim());
+        });
+      });
+    } catch (_) {
+      // Cross-origin navigation (e.g. external link opened in iframe) — ignore
+    }
+  }, []);
+
   return (
     <div style={S.root}>
       {/* ── Toolbar ── */}
@@ -179,7 +268,7 @@ export default function App() {
         />
       </div>
 
-      {/* ── Editor + Post window ── */}
+      {/* ── Editor + Right panel ── */}
       <div style={S.body}>
         <div style={S.editor}>
           <CodeMirror
@@ -191,8 +280,33 @@ export default function App() {
           />
         </div>
 
-        <div ref={postRef} style={S.post}>
-          {output}
+        {/* Right panel: Post / Help tabs */}
+        <div style={S.rightPanel(rightTab === 'help')}>
+          <div style={S.tabBar}>
+            <button style={S.tab(rightTab === 'post')} onClick={() => setRightTab('post')}>
+              Post
+            </button>
+            <button style={S.tab(rightTab === 'help')} onClick={() => setRightTab('help')}>
+              Help
+            </button>
+          </div>
+
+          {/* Post window — always mounted, hidden when Help tab active */}
+          <div
+            ref={postRef}
+            style={{ ...S.post, display: rightTab === 'post' ? 'block' : 'none' }}
+          >
+            {output}
+          </div>
+
+          {/* Help iframe — always mounted so navigation is preserved across tab switches */}
+          <iframe
+            ref={iframeRef}
+            src="/help/"
+            style={{ ...S.helpFrame, display: rightTab === 'help' ? 'block' : 'none' }}
+            onLoad={handleHelpLoad}
+            title="SuperCollider Help"
+          />
         </div>
       </div>
     </div>

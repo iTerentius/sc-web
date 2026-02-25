@@ -1,5 +1,5 @@
 'use strict';
-const { spawn } = require('child_process');
+const http = require('http');
 const { WebSocketServer } = require('ws');
 const fs = require('fs');
 const path = require('path');
@@ -8,10 +8,52 @@ const os = require('os');
 const PORT = 4000;
 const STARTUP_SCD = '/home/scuser/sc/startup.scd';
 const EVAL_DIR = os.tmpdir();
+const HELP_DIR = '/usr/local/share/SuperCollider/Help';
+
+// ── MIME types for help file serving ─────────────────────────────────────────
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css':  'text/css',
+  '.js':   'application/javascript',
+  '.png':  'image/png',
+  '.svg':  'image/svg+xml',
+  '.gif':  'image/gif',
+  '.ico':  'image/x-icon',
+  '.json': 'application/json',
+};
+
+// ── HTTP server (serves /help; WebSocket is attached to same server) ──────────
+const server = http.createServer((req, res) => {
+  if (!req.url.startsWith('/help')) {
+    res.writeHead(404); res.end('Not found'); return;
+  }
+
+  let rel = req.url.slice('/help'.length) || '/';
+  if (rel === '/') {
+    // Try the standard SCDoc entry points in order
+    for (const name of ['Help.html', 'index.html']) {
+      const p = path.join(HELP_DIR, name);
+      if (fs.existsSync(p)) { rel = '/' + name; break; }
+    }
+  }
+
+  // Prevent directory traversal
+  const filePath = path.resolve(HELP_DIR, rel.replace(/^\/+/, ''));
+  if (!filePath.startsWith(HELP_DIR + path.sep) && filePath !== HELP_DIR) {
+    res.writeHead(403); res.end('Forbidden'); return;
+  }
+
+  const ext = path.extname(filePath);
+  fs.readFile(filePath, (err, data) => {
+    if (err) { res.writeHead(404); res.end('Not found'); return; }
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.end(data);
+  });
+});
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ port: PORT });
+const wss = new WebSocketServer({ server });
 const clients = new Set();
 
 function broadcast(obj) {
@@ -46,6 +88,7 @@ function evalCode(code) {
 
 // ── sclang process ───────────────────────────────────────────────────────────
 
+const { spawn } = require('child_process');
 let sclangProc = null;
 let sclangAlive = false;
 let startupSent = false;
@@ -64,7 +107,6 @@ function startSclang() {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      QT_QPA_PLATFORM: 'offscreen',
       PULSE_RUNTIME_PATH: process.env.PULSE_RUNTIME_PATH || '/tmp/pulse-runtime',
     },
   });
@@ -146,4 +188,6 @@ wss.on('connection', (ws, req) => {
 });
 
 startSclang();
-console.log(`[bridge] Listening on ws://0.0.0.0:${PORT}`);
+server.listen(PORT, () => {
+  console.log(`[bridge] Listening on ws://0.0.0.0:${PORT} (HTTP /help also served)`);
+});
