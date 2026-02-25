@@ -1,13 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { supercollider } from './sc-language.js';
+import { keymap } from '@codemirror/view';
 
 // ── SuperCollider example shown on first load ────────────────────────────────
 const INITIAL_CODE = `// SC Web — SuperCollider Browser IDE
-// Ctrl+Enter  →  evaluate current ( ) block, or selection
-// Ctrl+/      →  toggle line comment(s)
-// Stop        →  CmdPeriod (silence everything)
+// Ctrl+Enter / Ctrl+e  →  evaluate current ( ) block, or selection
+// Ctrl+/               →  toggle line comment(s)
+// Stop                 →  CmdPeriod (silence everything)
 
 // Place the cursor inside any ( ) block and press Ctrl+Enter.
 
@@ -259,27 +260,24 @@ export default function App() {
   // Priority: text selection → current ( ) block → current line
   const handleEval = useCallback(() => {
     const view = editorRef.current;
-    let codeToEval = code; // fallback if view not ready
-    if (view) {
-      const sel = view.state.selection.main;
-      codeToEval = sel.empty
-        ? findCurrentBlock(view.state.doc.toString(), sel.head)
-        : view.state.doc.sliceString(sel.from, sel.to);
-    }
+    if (!view) return;
+    const sel = view.state.selection.main;
+    const codeToEval = sel.empty
+      ? findCurrentBlock(view.state.doc.toString(), sel.head)
+      : view.state.doc.sliceString(sel.from, sel.to);
     if (codeToEval.trim()) send('eval', { code: codeToEval });
-  }, [code, send]);
+  }, [send]);
 
   const handleStop = useCallback(() => send('stop'), [send]);
   const handleClear = () => setOutput('');
 
-  // Keyboard shortcut: Ctrl+Enter to eval
-  useEffect(() => {
-    const handler = (e) => {
-      if (e.ctrlKey && e.key === 'Enter') { e.preventDefault(); handleEval(); }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [handleEval]);
+  // Keyboard shortcuts: Ctrl+Enter / Ctrl+e to eval
+  // Placed inside CM6's keymap so `run` returning true prevents any further
+  // processing (newline insertion) — window-level listeners fire too late.
+  const evalKeymap = useMemo(() => keymap.of([
+    { key: 'Ctrl-Enter', run: () => { handleEval(); return true; }, preventDefault: true },
+    { key: 'Ctrl-e',     run: () => { handleEval(); return true; }, preventDefault: true },
+  ]), [handleEval]);
 
   // Inject click-to-editor handlers into the help iframe after each navigation.
   // Same-origin iframe: we can access contentDocument directly and close over setCode.
@@ -357,7 +355,7 @@ export default function App() {
             theme={oneDark}
             height="100%"
             style={{ height: '100%' }}
-            extensions={supercollider}
+            extensions={[supercollider, evalKeymap]}
             onCreateEditor={(view) => { editorRef.current = view; }}
             onChange={setCode}
           />
